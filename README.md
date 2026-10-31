@@ -1,4 +1,4 @@
-## 🧭 AI Learning Roadmap Generator
+# 🧭 AI Learning Roadmap Generator
 
 A beginner-friendly web app that creates a **personalized learning roadmap** for any field or skill using Google Gemini AI.
 
@@ -11,6 +11,8 @@ A beginner-friendly web app that creates a **personalized learning roadmap** for
 - Expandable sections, sidebar navigation, loading spinner
 - Download your roadmap as TXT or Markdown
 - Error handling for missing API key, bad input, connection problems, API errors, and empty responses
+- Automatic fallback to another Gemini model if one is unavailable
+- Sidebar button to check your API key and list the models it can use
 
 ## 🛠 Technologies Used
 
@@ -118,13 +120,19 @@ Open the link that is printed and enter the tunnel password shown above.
 
 To change the secret later: app menu → **Settings → Secrets**.
 
-## ⚙️ Optional: Change the Gemini Model
+## ⚙️ Gemini Model Names (Important)
 
-The default model is `gemini-2.5-flash`. If Google retires or renames it, check the current model names in Google AI Studio and add this to your secrets (no code change needed):
+Google retires models regularly. `gemini-2.5-flash` and the other 2.5 models are now limited to accounts that already used them, so new API keys get a **404 "model not found"** error.
+
+This app uses **`gemini-3.8-flash`** by default and automatically falls back to `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, and `gemini-flash-latest` if one is not available for your key.
+
+To choose a model yourself, add this to your secrets (no code change needed):
 
 ```toml
-GEMINI_MODEL = "new-model-name"
+GEMINI_MODEL = "gemini-3.8-flash"
 ```
+
+Not sure which models your key can use? Run the app and click **🔍 Check API key and models** in the sidebar. It lists the models available to your key. You can also see the official list at https://ai.google.dev/gemini-api/docs/models
 
 ## 🧯 Troubleshooting
 
@@ -132,9 +140,10 @@ GEMINI_MODEL = "new-model-name"
 |---|---|
 | "API key not found" | Check the secret is named exactly `GEMINI_API_KEY` |
 | Error 400/403 | Key is invalid or restricted, create a new one |
-| Error 404 | Model name is outdated, set `GEMINI_MODEL` |
+| Error 404 / "model not found" | Click **Check API key and models** in the sidebar, then set `GEMINI_MODEL` to one it lists. Also run `pip install -U google-genai` |
 | Error 429 | Free quota reached, wait and retry |
 | `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
+| Old SDK problems | Run `pip install -U streamlit google-genai` |
 
 ## 🔒 Security
 
@@ -142,4 +151,4 @@ Never write your API key inside `app.py` or commit `secrets.toml`. If a key leak
 
 ## 📄 License
 
-Free to use for learning purposes. waleed-ai-roadmap
+Free to use for learning purposes.
