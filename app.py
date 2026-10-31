@@ -22,7 +22,16 @@ st.set_page_config(
     layout="wide",
 )
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# Gemini model names change over time. The app tries them in this order and
+# automatically moves to the next one if a model is not found (404) or overloaded.
+# gemini-2.5-* models are no longer available to new API keys.
+DEFAULT_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-latest",
+]
 
 CUSTOM_CSS = """
 <style>
@@ -141,52 +150,87 @@ Rules:
 """
 
 
-def generate_roadmap(api_key, model_name, prompt):
-    """Call Gemini and return (text, error_message). One of them is None."""
+def friendly_api_error(e, model_name):
+    """Turn a Gemini API error into a clear message for the user."""
+    code = getattr(e, "code", None)
+    if code in (400, 401, 403):
+        return (
+            f"Gemini rejected the request (error {code}). Your API key may be "
+            "invalid, restricted, or missing access. Create a new key in Google AI Studio."
+        )
+    if code == 429:
+        return "Rate limit or free quota reached. Please wait a minute and try again."
+    return f"Gemini API error ({code}): {getattr(e, 'message', str(e))}"
+
+
+def generate_roadmap(api_key, primary_model, prompt):
+    """
+    Call Gemini and return (text, error_message, model_used).
+    If a model is not found or is overloaded, the next model in the list is tried.
+    """
     try:
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(model=model_name, contents=prompt)
-        text = (response.text or "").strip()
-        if not text:
-            return None, (
-                "Gemini returned an empty response. This can happen when the "
-                "request is blocked by safety filters. Try rephrasing your field or goal."
-            )
-        return text, None
+    except Exception as e:
+        return None, f"Could not create the Gemini client: {e}", None
 
-    except genai_errors.ClientError as e:
-        code = getattr(e, "code", None)
-        if code in (400, 401, 403):
-            return None, (
-                f"Gemini rejected the request (error {code}). Your API key may be "
-                "invalid or may not have access to this model. Please check it in Google AI Studio."
-            )
-        if code == 404:
-            return None, (
-                f"Model '{model_name}' was not found. Set a valid model name in "
-                "your secrets as GEMINI_MODEL (see Google AI Studio for current names)."
-            )
-        if code == 429:
-            return None, "Rate limit or free quota reached. Please wait a minute and try again."
-        return None, f"Gemini API error ({code}): {getattr(e, 'message', str(e))}"
+    models_to_try = [primary_model] + [m for m in FALLBACK_MODELS if m != primary_model]
+    last_error = "No model could be used."
 
-    except genai_errors.ServerError as e:
-        return None, (
-            f"Gemini servers are having problems right now ({getattr(e, 'code', '')}). "
-            "Please try again in a few moments."
-        )
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            text = (response.text or "").strip()
+            if not text:
+                return None, (
+                    "Gemini returned an empty response. This can happen when the "
+                    "request is blocked by safety filters. Try rephrasing your field or goal."
+                ), model_name
+            return text, None, model_name
 
+        except genai_errors.ClientError as e:
+            if getattr(e, "code", None) == 404:
+                last_error = f"Model '{model_name}' is not available for your key."
+                continue  # Try the next model.
+            return None, friendly_api_error(e, model_name), model_name
+
+        except genai_errors.ServerError as e:
+            last_error = (
+                f"Gemini servers are busy right now ({getattr(e, 'code', '')}). "
+                "Please try again in a few moments."
+            )
+            continue  # Try the next model.
+
+        except genai_errors.APIError as e:
+            return None, friendly_api_error(e, model_name), model_name
+
+        except Exception as e:  # Connection problems and anything unexpected.
+            message = str(e)
+            if any(w in message.lower() for w in ("connect", "timeout", "timed out", "network", "dns")):
+                return None, f"Could not connect to the Gemini API. Check your internet connection. ({message})", model_name
+            return None, f"Unexpected error: {message}", model_name
+
+    return None, (
+        f"{last_error} Tried: {', '.join(models_to_try)}. "
+        "Open the sidebar and click 'Check API key and models' to see which models your key can use, "
+        "then set GEMINI_MODEL in your secrets."
+    ), None
+
+
+def list_available_models(api_key):
+    """Return (names, error). Used by the sidebar 'Check API key' button."""
+    try:
+        client = genai.Client(api_key=api_key)
+        names = []
+        for m in client.models.list():
+            name = (getattr(m, "name", "") or "").replace("models/", "")
+            actions = getattr(m, "supported_actions", None) or []
+            if name.startswith("gemini") and ("generateContent" in actions or not actions):
+                names.append(name)
+        return sorted(set(names)), None
     except genai_errors.APIError as e:
-        return None, f"Gemini API error: {getattr(e, 'message', str(e))}"
-
-    except (ConnectionError, TimeoutError, OSError) as e:
-        return None, f"Could not connect to the Gemini API. Check your internet connection. ({e})"
-
-    except Exception as e:  # Last safety net so the app never crashes.
-        message = str(e)
-        if "connect" in message.lower() or "timeout" in message.lower():
-            return None, f"Connection problem while contacting Gemini: {message}"
-        return None, f"Unexpected error: {message}"
+        return None, friendly_api_error(e, "")
+    except Exception as e:
+        return None, f"Could not reach Gemini: {e}"
 
 
 def split_sections(markdown_text):
@@ -226,6 +270,20 @@ with st.sidebar:
     st.caption("Your personal learning planner")
     page = st.radio("Navigation", ["🚀 Generate Roadmap", "ℹ️ About"], label_visibility="collapsed")
     st.divider()
+    if st.button("🔍 Check API key and models"):
+        _key = get_api_key()
+        if not _key:
+            st.error("No API key found.")
+        else:
+            with st.spinner("Checking..."):
+                _names, _err = list_available_models(_key)
+            if _err:
+                st.error(_err)
+            elif not _names:
+                st.warning("Key works, but no Gemini models were listed.")
+            else:
+                st.success(f"Key works. {len(_names)} models available.")
+                st.code("\n".join(_names))
     st.caption("Powered by Google Gemini and Streamlit")
 
 
@@ -316,7 +374,7 @@ if generate:
     else:
         prompt = build_prompt(field.strip(), level, duration, hours, goal.strip())
         with st.spinner("🤖 Gemini is building your personalized roadmap..."):
-            roadmap, error = generate_roadmap(api_key, get_model_name(), prompt)
+            roadmap, error, model_used = generate_roadmap(api_key, get_model_name(), prompt)
 
         if error:
             st.error(error)
@@ -330,6 +388,7 @@ if generate:
                 "hours": hours,
                 "goal": goal.strip(),
             }
+            st.session_state["model_used"] = model_used
 
 
 # ----------------------------------------------------------------------------
@@ -346,6 +405,8 @@ if "roadmap" in st.session_state:
     m1.metric("Level", info["level"])
     m2.metric("Duration", info["duration"])
     m3.metric("Daily Study", f"{info['hours']} h")
+
+    st.caption(f"Generated with {st.session_state.get('model_used', 'Gemini')}")
 
     intro, sections = split_sections(roadmap)
     if intro:
